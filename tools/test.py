@@ -7,6 +7,7 @@ import logging
 from omegaconf import OmegaConf
 from omegaconf import DictConfig
 from tqdm import tqdm
+import cv2
 
 import torch
 
@@ -20,10 +21,10 @@ warnings.filterwarnings("ignore", category=ShapelyDeprecationWarning)
 sys.path.append(".")  # noqa
 from magicdrive.runner.utils import concat_6_views
 from magicdrive.misc.test_utils import (
-    prepare_all, run_one_batch
+    prepare_all, run_one_batch, run_one_batch_save
 )
 
-transparent_bg = True
+transparent_bg = False
 target_map_size = 400
 # target_map_size = 800
 
@@ -58,6 +59,7 @@ def main(cfg: DictConfig):
 
     #### setup everything ####
     pipe, val_dataloader, weight_dtype = prepare_all(cfg)
+    data = val_dataloader.dataset.__getitem__(5)
     OmegaConf.save(config=cfg, f=os.path.join(cfg.log_root, "run_config.yaml"))
 
     #### start ####
@@ -67,6 +69,10 @@ def main(cfg: DictConfig):
         desc="Steps",
     )
     for val_input in val_dataloader:
+        # return_tuples = run_one_batch_save(cfg, pipe, val_input, weight_dtype,
+        #                               transparent_bg=transparent_bg,
+        #                               map_size=target_map_size, total_num=total_num)
+        # total_num += 1
         return_tuples = run_one_batch(cfg, pipe, val_input, weight_dtype,
                                       transparent_bg=transparent_bg,
                                       map_size=target_map_size)
@@ -100,7 +106,33 @@ def main(cfg: DictConfig):
 
         # update bar
         progress_bar.update(cfg.runner.validation_times)
+    # img2video(cfg)
 
+
+def img2video(cfg):
+    image_list = []
+    for idx in cfg.runner.validation_index:
+        imgs = []
+        for i in range(4):
+            img_path = os.path.join(cfg.log_root, f"{idx}_gen{i}_box.png")
+            img = cv2.imread(img_path)
+            imgs.append(img)
+        image = cv2.vconcat(
+            [
+                cv2.hconcat([imgs[0], imgs[1]]),
+                cv2.hconcat([imgs[2], imgs[3]]),
+            ]
+        )
+        image_list.append(image)
+    h, w, c = image.shape
+    size = (w, h)
+    out_path = os.path.join(cfg.log_root, "video.mp4")
+    out = cv2.VideoWriter(
+        out_path, cv2.VideoWriter_fourcc(*"mp4v"), 5, size
+    )
+    for image in image_list:
+        out.write(image)
+    out.release()
 
 if __name__ == "__main__":
     main()

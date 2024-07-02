@@ -47,6 +47,8 @@ save_model_per_epoch: null
 validation_before_run: false
 validation_index: [204, 912, 1828, 2253, 4467, 5543]
 validation_times: 4
+# validation_index: all
+# validation_times: 1
 validation_batch_size: 1
 validation_show_box: false
 validation_seed_global: false

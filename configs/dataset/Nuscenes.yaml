@@ -1,6 +1,7 @@
 dataset_type: NuScenesDatasetM
 dataset_root: data/nuscenes/
 dataset_process_root: data/nuscenes_mmdet3d_2/  # with visibility
+# dataset_process_root: data/nuscenes_mmdet3d_2/mini/  # with visibility
 dataset_cache_file_tag: null
 dataset_cache_file:
   - null  # for train_pipeline

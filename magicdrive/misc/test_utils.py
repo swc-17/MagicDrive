@@ -319,3 +319,50 @@ def run_one_batch(cfg, pipe, val_input, weight_dtype, global_generator=None,
             gen_imgs_wb_list.append(None)
 
     return map_imgs, ori_imgs, ori_imgs_with_box, gen_imgs_list, gen_imgs_wb_list
+
+
+def run_one_batch_save(cfg, pipe, val_input, weight_dtype, global_generator=None,
+                  run_one_batch_pipe_func=run_one_batch_pipe,
+                  transparent_bg=False, map_size=400, total_num=0):
+    """Run one batch of data according to your configuration
+
+    Returns:
+        List[Image.Image]: map image
+        List[List[Image.Image]]: ori images
+        List[List[Image.Image]]: ori images with bbox, can be []
+        List[List[Tuple[Image.Image]]]: generated images list
+        List[List[Tuple[Image.Image]]]: generated images list, can be []
+        if 2-dim: B, views; if 3-dim: B, Times, views
+    """
+    VIEW_ORDER = [
+        "CAM_FRONT_LEFT",
+        "CAM_FRONT",
+        "CAM_FRONT_RIGHT",
+        "CAM_BACK_RIGHT",
+        "CAM_BACK",
+        "CAM_BACK_LEFT",
+    ]
+    ORI_ORDER = [
+        "CAM_FRONT",
+        "CAM_FRONT_RIGHT",
+        "CAM_FRONT_LEFT",
+        "CAM_BACK",
+        "CAM_BACK_LEFT",
+        "CAM_BACK_RIGHT",
+    ]
+   
+    camera_param = val_input["camera_param"].to(weight_dtype)
+
+    # 3-dim list: B, Times, views
+    gen_imgs_list = run_one_batch_pipe_func(
+        cfg, pipe, val_input['pixel_values'], val_input['captions'],
+        val_input['bev_map_with_aux'], camera_param, val_input['kwargs'],
+        global_generator=global_generator)
+
+    data_path = 'data/generated_images_mini'
+    for i, order in enumerate(ORI_ORDER):
+        index = VIEW_ORDER.index(order)
+        img = gen_imgs_list[0][0][index]
+        img.save(f'{data_path}/img_{str(total_num).zfill(4)}_{i}.jpg')
+
+    return None
