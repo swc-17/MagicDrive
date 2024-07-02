@@ -11,14 +11,21 @@ from nuscenes.map_expansion.map_api import locations as LOCATIONS
 from PIL import Image
 import PIL.ImageDraw as ImageDraw
 
+import torch
+import torchvision
 
+from mmcv.parallel import DataContainer as DC
 from mmdet.datasets.builder import PIPELINES
-from mmdet3d.core.bbox import (
-    CameraInstance3DBoxes,
-    DepthInstance3DBoxes,
-    LiDARInstance3DBoxes,
-)
+from mmdet.datasets.pipelines import to_tensor
+from mmdet.datasets.pipelines import LoadAnnotations
 
+# from mmdet3d.core.bbox import (
+#     CameraInstance3DBoxes,
+#     DepthInstance3DBoxes,
+#     LiDARInstance3DBoxes,
+# )
+from magicdrive.core.bbox_structure.base_box3d import BaseInstance3DBoxes
+from magicdrive.core.bbox_structure.lidar_box3d import LiDARInstance3DBoxes
 from .pipeline_utils import one_hot_decode
 
 
@@ -350,11 +357,11 @@ class ObjectRangeFilterM:
         """
         # Check points instance type and initialise bev_range
         if isinstance(
-            data["gt_bboxes_3d"], (LiDARInstance3DBoxes, DepthInstance3DBoxes)
+            data["gt_bboxes_3d"], (LiDARInstance3DBoxes,)
         ):
             bev_range = self.pcd_range[[0, 1, 3, 4]]
-        elif isinstance(data["gt_bboxes_3d"], CameraInstance3DBoxes):
-            bev_range = self.pcd_range[[0, 2, 3, 5]]
+        # elif isinstance(data["gt_bboxes_3d"], CameraInstance3DBoxes):
+        #     bev_range = self.pcd_range[[0, 2, 3, 5]]
 
         gt_bboxes_3d = data["gt_bboxes_3d"]
         gt_labels_3d = data["gt_labels_3d"]
@@ -712,4 +719,537 @@ class RandomFlip3DwithViews:
             data.pop("camera2ego")
 
         data["lidar_aug_matrix"][:3, :] = rotation @ data["lidar_aug_matrix"][:3, :]
+        return data
+
+# ==================== copy from mmdet3d ===================#
+
+@PIPELINES.register_module()
+class LoadMultiViewImageFromFiles:
+    """Load multi channel images from a list of separate channel files.
+
+    Expects results['image_paths'] to be a list of filenames.
+
+    Args:
+        to_float32 (bool): Whether to convert the img to float32.
+            Defaults to False.
+        color_type (str): Color type of the file. Defaults to 'unchanged'.
+    """
+
+    def __init__(self, to_float32=False, color_type="unchanged"):
+        self.to_float32 = to_float32
+        self.color_type = color_type
+
+    def __call__(self, results):
+        """Call function to load multi-view image from files.
+
+        Args:
+            results (dict): Result dict containing multi-view image filenames.
+
+        Returns:
+            dict: The result dict containing the multi-view image data. \
+                Added keys and values are described below.
+
+                - filename (str): Multi-view image filenames.
+                - img (np.ndarray): Multi-view image arrays.
+                - img_shape (tuple[int]): Shape of multi-view image arrays.
+                - ori_shape (tuple[int]): Shape of original image arrays.
+                - pad_shape (tuple[int]): Shape of padded image arrays.
+                - scale_factor (float): Scale factor.
+                - img_norm_cfg (dict): Normalization configuration of images.
+        """
+        filename = results["image_paths"]
+        # img is of shape (h, w, c, num_views)
+        # modified for waymo
+        images = []
+        h, w = 0, 0
+        for name in filename:
+            images.append(Image.open(name))
+        
+        #TODO: consider image padding in waymo
+
+        results["filename"] = filename
+        # unravel to list, see `DefaultFormatBundle` in formating.py
+        # which will transpose each image separately and then stack into array
+        results["img"] = images
+        # [1600, 900]
+        results["img_shape"] = images[0].size
+        results["ori_shape"] = images[0].size
+        # Set initial values for default meta_keys
+        results["pad_shape"] = images[0].size
+        results["scale_factor"] = 1.0
+        
+        return results
+
+    def __repr__(self):
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f"(to_float32={self.to_float32}, "
+        repr_str += f"color_type='{self.color_type}')"
+        return repr_str
+
+
+@PIPELINES.register_module()
+class LoadAnnotations3D(LoadAnnotations):
+    """Load Annotations3D.
+
+    Load instance mask and semantic mask of points and
+    encapsulate the items into related fields.
+
+    Args:
+        with_bbox_3d (bool, optional): Whether to load 3D boxes.
+            Defaults to True.
+        with_label_3d (bool, optional): Whether to load 3D labels.
+            Defaults to True.
+        with_attr_label (bool, optional): Whether to load attribute label.
+            Defaults to False.
+        with_bbox (bool, optional): Whether to load 2D boxes.
+            Defaults to False.
+        with_label (bool, optional): Whether to load 2D labels.
+            Defaults to False.
+        with_mask (bool, optional): Whether to load 2D instance masks.
+            Defaults to False.
+        with_seg (bool, optional): Whether to load 2D semantic masks.
+            Defaults to False.
+        with_bbox_depth (bool, optional): Whether to load 2.5D boxes.
+            Defaults to False.
+        poly2mask (bool, optional): Whether to convert polygon annotations
+            to bitmasks. Defaults to True.
+    """
+
+    def __init__(
+        self,
+        with_bbox_3d=True,
+        with_label_3d=True,
+        with_attr_label=False,
+        with_bbox=False,
+        with_label=False,
+        with_mask=False,
+        with_seg=False,
+        with_bbox_depth=False,
+        poly2mask=True,
+    ):
+        super().__init__(
+            with_bbox,
+            with_label,
+            with_mask,
+            with_seg,
+            poly2mask,
+        )
+        self.with_bbox_3d = with_bbox_3d
+        self.with_bbox_depth = with_bbox_depth
+        self.with_label_3d = with_label_3d
+        self.with_attr_label = with_attr_label
+
+    def _load_bboxes_3d(self, results):
+        """Private function to load 3D bounding box annotations.
+
+        Args:
+            results (dict): Result dict from :obj:`mmdet3d.CustomDataset`.
+
+        Returns:
+            dict: The dict containing loaded 3D bounding box annotations.
+        """
+        results["gt_bboxes_3d"] = results["ann_info"]["gt_bboxes_3d"]
+        results["bbox3d_fields"].append("gt_bboxes_3d")
+        return results
+
+    def _load_bboxes_depth(self, results):
+        """Private function to load 2.5D bounding box annotations.
+
+        Args:
+            results (dict): Result dict from :obj:`mmdet3d.CustomDataset`.
+
+        Returns:
+            dict: The dict containing loaded 2.5D bounding box annotations.
+        """
+        results["centers2d"] = results["ann_info"]["centers2d"]
+        results["depths"] = results["ann_info"]["depths"]
+        return results
+
+    def _load_labels_3d(self, results):
+        """Private function to load label annotations.
+
+        Args:
+            results (dict): Result dict from :obj:`mmdet3d.CustomDataset`.
+
+        Returns:
+            dict: The dict containing loaded label annotations.
+        """
+        results["gt_labels_3d"] = results["ann_info"]["gt_labels_3d"]
+        return results
+
+    def _load_attr_labels(self, results):
+        """Private function to load label annotations.
+
+        Args:
+            results (dict): Result dict from :obj:`mmdet3d.CustomDataset`.
+
+        Returns:
+            dict: The dict containing loaded label annotations.
+        """
+        results["attr_labels"] = results["ann_info"]["attr_labels"]
+        return results
+
+    def __call__(self, results):
+        """Call function to load multiple types annotations.
+
+        Args:
+            results (dict): Result dict from :obj:`mmdet3d.CustomDataset`.
+
+        Returns:
+            dict: The dict containing loaded 3D bounding box, label, mask and
+                semantic segmentation annotations.
+        """
+        results = super().__call__(results)
+        if self.with_bbox_3d:
+            results = self._load_bboxes_3d(results)
+            if results is None:
+                return None
+        if self.with_bbox_depth:
+            results = self._load_bboxes_depth(results)
+            if results is None:
+                return None
+        if self.with_label_3d:
+            results = self._load_labels_3d(results)
+        if self.with_attr_label:
+            results = self._load_attr_labels(results)
+
+        return results
+
+
+@PIPELINES.register_module()
+class ImageAug3D:
+    def __init__(
+        self, final_dim, resize_lim, bot_pct_lim, rot_lim, rand_flip, is_train
+    ):
+        self.final_dim = final_dim
+        self.resize_lim = resize_lim
+        self.bot_pct_lim = bot_pct_lim
+        self.rand_flip = rand_flip
+        self.rot_lim = rot_lim
+        self.is_train = is_train
+
+    def sample_augmentation(self, results):
+        W, H = results["ori_shape"]
+        fH, fW = self.final_dim
+        if self.is_train:
+            resize = np.random.uniform(*self.resize_lim)
+            resize_dims = (int(W * resize), int(H * resize))
+            newW, newH = resize_dims
+            crop_h = int((1 - np.random.uniform(*self.bot_pct_lim)) * newH) - fH
+            crop_w = int(np.random.uniform(0, max(0, newW - fW)))
+            crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            flip = False
+            if self.rand_flip and np.random.choice([0, 1]):
+                flip = True
+            rotate = np.random.uniform(*self.rot_lim)
+        else:
+            resize = np.mean(self.resize_lim)
+            resize_dims = (int(W * resize), int(H * resize))
+            newW, newH = resize_dims
+            crop_h = int((1 - np.mean(self.bot_pct_lim)) * newH) - fH
+            crop_w = int(max(0, newW - fW) / 2)
+            crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            flip = False
+            rotate = 0
+        return resize, resize_dims, crop, flip, rotate
+
+    def img_transform(
+        self, img, rotation, translation, resize, resize_dims, crop, flip, rotate
+    ):
+        # adjust image
+        img = img.resize(resize_dims)
+        img = img.crop(crop)
+        if flip:
+            img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
+        img = img.rotate(rotate)
+
+        # post-homography transformation
+        rotation *= resize
+        translation -= torch.Tensor(crop[:2])
+        if flip:
+            A = torch.Tensor([[-1, 0], [0, 1]])
+            b = torch.Tensor([crop[2] - crop[0], 0])
+            rotation = A.matmul(rotation)
+            translation = A.matmul(translation) + b
+        theta = rotate / 180 * np.pi
+        A = torch.Tensor(
+            [
+                [np.cos(theta), np.sin(theta)],
+                [-np.sin(theta), np.cos(theta)],
+            ]
+        )
+        b = torch.Tensor([crop[2] - crop[0], crop[3] - crop[1]]) / 2
+        b = A.matmul(-b) + b
+        rotation = A.matmul(rotation)
+        translation = A.matmul(translation) + b
+
+        return img, rotation, translation
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        imgs = data["img"]
+        new_imgs = []
+        transforms = []
+        for img in imgs:
+            resize, resize_dims, crop, flip, rotate = self.sample_augmentation(data)
+            post_rot = torch.eye(2)
+            post_tran = torch.zeros(2)
+            new_img, rotation, translation = self.img_transform(
+                img,
+                post_rot,
+                post_tran,
+                resize=resize,
+                resize_dims=resize_dims,
+                crop=crop,
+                flip=flip,
+                rotate=rotate,
+            )
+            transform = torch.eye(4)
+            transform[:2, :2] = rotation
+            transform[:2, 3] = translation
+            new_imgs.append(new_img)
+            transforms.append(transform.numpy())
+        data["img"] = new_imgs
+        # update the calibration matrices
+        data["img_aug_matrix"] = transforms
+        return data
+
+
+@PIPELINES.register_module()
+class GlobalRotScaleTrans:
+    def __init__(self, resize_lim, rot_lim, trans_lim, is_train):
+        self.resize_lim = resize_lim
+        self.rot_lim = rot_lim
+        self.trans_lim = trans_lim
+        self.is_train = is_train
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        transform = np.eye(4).astype(np.float32)
+
+        if self.is_train:
+            scale = random.uniform(*self.resize_lim)
+            theta = random.uniform(*self.rot_lim)
+            translation = np.array([random.normal(0, self.trans_lim) for i in range(3)])
+            rotation = np.eye(3)
+
+            if "points" in data:
+                data["points"].rotate(-theta)
+                data["points"].translate(translation)
+                data["points"].scale(scale)
+
+            gt_boxes = data["gt_bboxes_3d"]
+            rotation = rotation @ gt_boxes.rotate(theta).numpy()
+            gt_boxes.translate(translation)
+            gt_boxes.scale(scale)
+            data["gt_bboxes_3d"] = gt_boxes
+
+            transform[:3, :3] = rotation.T * scale
+            transform[:3, 3] = translation * scale
+
+        data["lidar_aug_matrix"] = transform
+        return data
+
+
+@PIPELINES.register_module()
+class ImageNormalize:
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+        self.compose = torchvision.transforms.Compose(
+            [
+                torchvision.transforms.ToTensor(),
+                torchvision.transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        data["img"] = [self.compose(img) for img in data["img"]]
+        data["img_norm_cfg"] = dict(mean=self.mean, std=self.std)
+        return data
+
+
+@PIPELINES.register_module()
+class DefaultFormatBundle3D:
+    """Default formatting bundle.
+
+    It simplifies the pipeline of formatting common fields for voxels,
+    including "proposals", "gt_bboxes", "gt_labels", "gt_masks" and
+    "gt_semantic_seg".
+    These fields are formatted as follows.
+
+    - img: (1)transpose, (2)to tensor, (3)to DataContainer (stack=True)
+    - proposals: (1)to tensor, (2)to DataContainer
+    - gt_bboxes: (1)to tensor, (2)to DataContainer
+    - gt_bboxes_ignore: (1)to tensor, (2)to DataContainer
+    - gt_labels: (1)to tensor, (2)to DataContainer
+    """
+
+    def __init__(
+        self,
+        classes,
+        with_gt: bool = True,
+        with_label: bool = True,
+    ) -> None:
+        super().__init__()
+        self.class_names = classes
+        self.with_gt = with_gt
+        self.with_label = with_label
+
+    def __call__(self, results):
+        """Call function to transform and format common fields in results.
+
+        Args:
+            results (dict): Result dict contains the data to convert.
+
+        Returns:
+            dict: The result dict contains the data that is formatted with
+                default bundle.
+        """
+        # Format 3D data
+        if "points" in results:
+            assert isinstance(results["points"], BasePoints)
+            results["points"] = DC(results["points"].tensor)
+
+        for key in ["voxels", "coors", "voxel_centers", "num_points"]:
+            if key not in results:
+                continue
+            results[key] = DC(to_tensor(results[key]), stack=False)
+
+        if self.with_gt:
+            # Clean GT bboxes in the final
+            if "gt_bboxes_3d_mask" in results:
+                gt_bboxes_3d_mask = results["gt_bboxes_3d_mask"]
+                results["gt_bboxes_3d"] = results["gt_bboxes_3d"][gt_bboxes_3d_mask]
+                if "gt_names_3d" in results:
+                    results["gt_names_3d"] = results["gt_names_3d"][gt_bboxes_3d_mask]
+                if "centers2d" in results:
+                    results["centers2d"] = results["centers2d"][gt_bboxes_3d_mask]
+                if "depths" in results:
+                    results["depths"] = results["depths"][gt_bboxes_3d_mask]
+            if "gt_bboxes_mask" in results:
+                gt_bboxes_mask = results["gt_bboxes_mask"]
+                if "gt_bboxes" in results:
+                    results["gt_bboxes"] = results["gt_bboxes"][gt_bboxes_mask]
+                results["gt_names"] = results["gt_names"][gt_bboxes_mask]
+            if self.with_label:
+                if "gt_names" in results and len(results["gt_names"]) == 0:
+                    results["gt_labels"] = np.array([], dtype=np.int64)
+                    results["attr_labels"] = np.array([], dtype=np.int64)
+                elif "gt_names" in results and isinstance(results["gt_names"][0], list):
+                    # gt_labels might be a list of list in multi-view setting
+                    results["gt_labels"] = [
+                        np.array(
+                            [self.class_names.index(n) for n in res], dtype=np.int64
+                        )
+                        for res in results["gt_names"]
+                    ]
+                elif "gt_names" in results:
+                    results["gt_labels"] = np.array(
+                        [self.class_names.index(n) for n in results["gt_names"]],
+                        dtype=np.int64,
+                    )
+                # we still assume one pipeline for one frame LiDAR
+                # thus, the 3D name is list[string]
+                if "gt_names_3d" in results:
+                    results["gt_labels_3d"] = np.array(
+                        [self.class_names.index(n) for n in results["gt_names_3d"]],
+                        dtype=np.int64,
+                    )
+        if "img" in results:
+            results["img"] = DC(torch.stack(results["img"]), stack=True)
+
+        for key in [
+            "proposals",
+            "gt_bboxes",
+            "gt_bboxes_ignore",
+            "gt_labels",
+            "gt_labels_3d",
+            "attr_labels",
+            "centers2d",
+            "depths",
+        ]:
+            if key not in results:
+                continue
+            if isinstance(results[key], list):
+                results[key] = DC([to_tensor(res) for res in results[key]])
+            else:
+                results[key] = DC(to_tensor(results[key]))
+        if "gt_bboxes_3d" in results:
+            if isinstance(results["gt_bboxes_3d"], BaseInstance3DBoxes):
+                results["gt_bboxes_3d"] = DC(results["gt_bboxes_3d"], cpu_only=True)
+            else:
+                results["gt_bboxes_3d"] = DC(to_tensor(results["gt_bboxes_3d"]))
+        return results
+
+
+@PIPELINES.register_module()
+class Collect3D:
+    def __init__(
+        self,
+        keys,
+        meta_keys=(
+            "camera_intrinsics",
+            "camera2ego",
+            "img_aug_matrix",
+            "lidar_aug_matrix",
+        ),
+        meta_lis_keys=(
+            "filename",
+            "timestamp",
+            "ori_shape",
+            "img_shape",
+            "lidar2image",
+            "depth2img",
+            "cam2img",
+            "pad_shape",
+            "scale_factor",
+            "flip",
+            "pcd_horizontal_flip",
+            "pcd_vertical_flip",
+            "box_mode_3d",
+            "box_type_3d",
+            "img_norm_cfg",
+            "pcd_trans",
+            "token",
+            "pcd_scale_factor",
+            "pcd_rotation",
+            "lidar_path",
+            "transformation_3d_flow",
+        ),
+    ):
+        self.keys = keys
+        self.meta_keys = meta_keys
+        # [fixme] note: need at least 1 meta lis key to perform training.
+        self.meta_lis_keys = meta_lis_keys
+
+    def __call__(self, results):
+        """Call function to collect keys in results. The keys in ``meta_keys``
+        will be converted to :obj:`mmcv.DataContainer`.
+
+        Args:
+            results (dict): Result dict contains the data to collect.
+
+        Returns:
+            dict: The result dict contains the following keys
+                - keys in ``self.keys``
+                - ``metas``
+        """
+        data = {}
+        for key in self.keys:
+            if key not in self.meta_keys:
+                data[key] = results[key]
+        for key in self.meta_keys:
+            if key in results:
+                val = np.array(results[key])
+                if isinstance(results[key], list):
+                    data[key] = DC(to_tensor(val), stack=True)
+                else:
+                    data[key] = DC(to_tensor(val), stack=True, pad_dims=1)
+
+        metas = {}
+        for key in self.meta_lis_keys:
+            if key in results:
+                metas[key] = results[key]
+
+        data["metas"] = DC(metas, cpu_only=True)
         return data

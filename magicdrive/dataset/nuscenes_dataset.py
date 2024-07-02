@@ -2,15 +2,20 @@ from typing import Any, Dict
 
 import numpy as np
 from pyquaternion import Quaternion
+from torch.utils.data import Dataset
 
+import mmcv
 from mmdet.datasets import DATASETS
+from mmdet.datasets.pipelines import Compose
 
-from mmdet3d.core.bbox import LiDARInstance3DBoxes
-from mmdet3d.datasets.nuscenes_dataset import NuScenesDataset
+import sys
+sys.path.append(".")
+from magicdrive.core.bbox_structure.lidar_box3d import LiDARInstance3DBoxes
+# from mmdet3d.core.bbox.structures import LiDARInstance3DBoxes
 
 
 @DATASETS.register_module()
-class NuScenesDatasetM(NuScenesDataset):
+class NuScenesDatasetM(Dataset):
     r"""NuScenes Dataset.
 
     This class serves as the API for experiments on the NuScenes Dataset.
@@ -66,21 +71,51 @@ class NuScenesDatasetM(NuScenesDataset):
         force_all_boxes=False,
     ) -> None:
         self.force_all_boxes = force_all_boxes
-        super().__init__(
-            ann_file=ann_file,
-            pipeline=pipeline,
-            dataset_root=dataset_root,
-            object_classes=object_classes,
-            map_classes=map_classes,
-            load_interval=load_interval,
-            with_velocity=with_velocity,
-            modality=modality,
-            box_type_3d=box_type_3d,
-            filter_empty_gt=filter_empty_gt,
-            test_mode=test_mode,
-            eval_version=eval_version,
-            use_valid_flag=use_valid_flag,
-        )
+        self.load_interval = load_interval
+        self.use_valid_flag = use_valid_flag
+        super().__init__()
+        self.dataset_root = dataset_root
+        self.ann_file = ann_file
+        self.test_mode = test_mode
+        self.modality = modality
+        self.filter_empty_gt = filter_empty_gt
+        self.box_mode_3d = 0
+
+        if object_classes is not None:
+            self.CLASSES = object_classes
+        self.map_classes = map_classes
+        self.cat2id = {name: i for i, name in enumerate(self.CLASSES)}
+        self.data_infos = self.load_annotations(self.ann_file)
+
+        if pipeline is not None:
+            self.pipeline = Compose(pipeline)
+
+        self.with_velocity = with_velocity
+        self.eval_version = eval_version
+        from nuscenes.eval.detection.config import config_factory
+        self.eval_detection_configs = config_factory(self.eval_version)
+
+        if not self.test_mode:
+            self._set_group_flag()
+
+    def __len__(self):
+        return len(self.data_infos)
+
+    def load_annotations(self, ann_file):
+        """Load annotations from ann_file.
+
+        Args:
+            ann_file (str): Path of the annotation file.
+
+        Returns:
+            list[dict]: List of annotations sorted by timestamps.
+        """
+        data = mmcv.load(ann_file)
+        data_infos = list(sorted(data["infos"], key=lambda e: e["timestamp"]))
+        data_infos = data_infos[:: self.load_interval]
+        self.metadata = data["metadata"]
+        self.version = self.metadata["version"]
+        return data_infos
 
     def get_cat_ids(self, idx):
         """Get category distribution of single scene.
@@ -105,6 +140,38 @@ class NuScenesDatasetM(NuScenesDataset):
             if name in self.CLASSES:
                 cat_ids.append(self.cat2id[name])
         return cat_ids
+
+    def pre_pipeline(self, results):
+        """Initialization before data preparation.
+
+        Args:
+            results (dict): Dict before data preprocessing.
+
+                - img_fields (list): Image fields.
+                - bbox3d_fields (list): 3D bounding boxes fields.
+                - pts_mask_fields (list): Mask fields of points.
+                - pts_seg_fields (list): Mask fields of point segments.
+                - bbox_fields (list): Fields of bounding boxes.
+                - mask_fields (list): Fields of masks.
+                - seg_fields (list): Segment fields.
+                - box_type_3d (str): 3D box type.
+                - box_mode_3d (str): 3D box mode.
+        """
+        results["img_fields"] = []
+        results["bbox3d_fields"] = []
+        results["pts_mask_fields"] = []
+        results["pts_seg_fields"] = []
+        results["bbox_fields"] = []
+        results["mask_fields"] = []
+        results["seg_fields"] = []
+        # results["box_type_3d"] = self.box_type_3d
+        results["box_mode_3d"] = self.box_mode_3d
+
+    def __getitem__(self, idx):
+        input_dict = self.get_data_info(idx)
+        self.pre_pipeline(input_dict)
+        example = self.pipeline(input_dict)
+        return example
 
     def get_data_info(self, index: int) -> Dict[str, Any]:
         info = self.data_infos[index]
@@ -243,3 +310,12 @@ class NuScenesDatasetM(NuScenesDataset):
             gt_names=gt_names_3d,
         )
         return anns_results, mask
+
+    def _set_group_flag(self):
+        """Set flag according to image aspect ratio.
+
+        Images with aspect ratio greater than 1 will be set as group 1,
+        otherwise group 0. In 3D datasets, they are all the same, thus are all
+        zeros.
+        """
+        self.flag = np.zeros(len(self), dtype=np.uint8)

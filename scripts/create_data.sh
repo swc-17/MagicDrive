@@ -1,1 +1,1 @@
-python tools/create_data.py nuscenes --root-path /data/nuscenes/ --out-dir ./data/nuscenes_mmdet3d_2 --extra-tag nuscenes 
+python tools/create_data.py nuscenes --root-path /data/nuscenes/ --out-dir ./data/nuscenes_mmdet3d_2/mini --extra-tag nuscenes --version v1.0-mini

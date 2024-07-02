@@ -8,7 +8,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from mmdet3d.datasets import build_dataset
+from mmdet.datasets import build_dataset
 from accelerate.utils import set_seed
 
 sys.path.append(".")

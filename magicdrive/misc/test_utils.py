@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torchvision.transforms.functional import to_pil_image
 
-from mmdet3d.datasets import build_dataset
+from mmdet.datasets import build_dataset
 from diffusers import UniPCMultistepScheduler
 import accelerate
 from accelerate.utils import set_seed

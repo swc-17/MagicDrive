@@ -11,8 +11,25 @@ from nuscenes.utils.geometry_utils import view_points
 from pyquaternion import Quaternion
 from shapely.geometry import MultiPoint, box
 
-from mmdet3d.core.bbox.box_np_ops import points_cam2img
-from mmdet3d.datasets import NuScenesDataset
+# from mmdet3d.core.bbox.box_np_ops import points_cam2img
+# from mmdet3d.datasets import NuScenesDataset
+
+NameMapping = {
+    "movable_object.barrier": "barrier",
+    "vehicle.bicycle": "bicycle",
+    "vehicle.bus.bendy": "bus",
+    "vehicle.bus.rigid": "bus",
+    "vehicle.car": "car",
+    "vehicle.construction": "construction_vehicle",
+    "vehicle.motorcycle": "motorcycle",
+    "human.pedestrian.adult": "pedestrian",
+    "human.pedestrian.child": "pedestrian",
+    "human.pedestrian.construction_worker": "pedestrian",
+    "human.pedestrian.police_officer": "pedestrian",
+    "movable_object.trafficcone": "traffic_cone",
+    "vehicle.trailer": "trailer",
+    "vehicle.truck": "truck",
+}
 
 nus_categories = (
     "car",
@@ -287,8 +304,8 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=
 
             names = [b.name for b in boxes]
             for i in range(len(names)):
-                if names[i] in NuScenesDataset.NameMapping:
-                    names[i] = NuScenesDataset.NameMapping[names[i]]
+                if names[i] in NameMapping:
+                    names[i] = NameMapping[names[i]]
             names = np.array(names)
             # we need to convert rot to SECOND format.
             gt_boxes = np.concatenate([locs, dims, -rots - np.pi / 2], axis=1)
@@ -657,9 +674,9 @@ def generate_record(
     coco_rec["image_id"] = sample_data_token
     coco_rec["area"] = (y2 - y1) * (x2 - x1)
 
-    if repro_rec["category_name"] not in NuScenesDataset.NameMapping:
+    if repro_rec["category_name"] not in NameMapping:
         return None
-    cat_name = NuScenesDataset.NameMapping[repro_rec["category_name"]]
+    cat_name = NameMapping[repro_rec["category_name"]]
     coco_rec["category_name"] = cat_name
     coco_rec["category_id"] = nus_categories.index(cat_name)
     coco_rec["bbox"] = [x1, y1, x2 - x1, y2 - y1]

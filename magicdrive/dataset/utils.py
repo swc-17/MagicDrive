@@ -6,7 +6,8 @@ import torch
 import numpy as np
 
 from transformers import CLIPTokenizer
-from mmdet3d.core.bbox import LiDARInstance3DBoxes
+# from mmdet3d.core.bbox import LiDARInstance3DBoxes
+from magicdrive.core.bbox_structure.lidar_box3d import LiDARInstance3DBoxes
 
 from ..runner.utils import trans_boxes_to_views
 

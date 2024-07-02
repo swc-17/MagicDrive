@@ -3,7 +3,8 @@ from glob import glob
 
 import torch
 from mmcv.parallel.data_container import DataContainer
-from mmdet3d.core.bbox.structures import LiDARInstance3DBoxes, Box3DMode
+# from mmdet3d.core.bbox.structures import LiDARInstance3DBoxes, Box3DMode
+from magicdrive.core.bbox_structure.lidar_box3d import LiDARInstance3DBoxes
 
 
 class ListSetWrapper(torch.utils.data.DataLoader):
@@ -38,7 +39,7 @@ class FolderSetWrapper(torch.utils.data.DataLoader):
         gt_bboxes_3d = data['gt_bboxes_3d'][:, :7]  # or all, either can work
         mmdet3d_format['gt_bboxes_3d'] = DataContainer(LiDARInstance3DBoxes(
                 gt_bboxes_3d, box_dim=gt_bboxes_3d.shape[-1],
-                origin=(0.5, 0.5, 0)).convert_to(Box3DMode.LIDAR))
+                origin=(0.5, 0.5, 0)))
 
         # recompute
         camera2lidar = torch.eye(4, dtype=data['lidar2camera'].dtype)

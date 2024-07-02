@@ -6,7 +6,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 import torch
 
-from mmdet3d.datasets import build_dataset
+from mmdet.datasets import build_dataset
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 

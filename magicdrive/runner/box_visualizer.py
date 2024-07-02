@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional, List
 import os
 import cv2
 import copy
@@ -10,8 +10,92 @@ import numpy as np
 import torch
 from accelerate.scheduler import AcceleratedScheduler
 
-from mmdet3d.core.bbox import LiDARInstance3DBoxes
+# from mmdet3d.core.bbox import LiDARInstance3DBoxes
 from mmdet3d.core.utils import visualize_camera
+import mmcv
+from magicdrive.core.bbox_structure.lidar_box3d import LiDARInstance3DBoxes
+
+OBJECT_PALETTE = {
+    "car": (255, 158, 0),
+    "truck": (255, 99, 71),
+    "construction_vehicle": (233, 150, 70),
+    "bus": (255, 69, 0),
+    "trailer": (255, 140, 0),
+    "barrier": (112, 128, 144),
+    "motorcycle": (255, 61, 99),
+    "bicycle": (220, 20, 60),
+    "pedestrian": (0, 0, 230),
+    "traffic_cone": (47, 79, 79),
+}
+
+def visualize_camera(
+    fpath: str,
+    image: np.ndarray,
+    *,
+    bboxes: Optional[LiDARInstance3DBoxes] = None,
+    labels: Optional[np.ndarray] = None,
+    transform: Optional[np.ndarray] = None,
+    classes: Optional[List[str]] = None,
+    color: Optional[Tuple[int, int, int]] = None,
+    thickness: float = 4,
+) -> None:
+    canvas = image.copy()
+    canvas = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
+
+    if bboxes is not None and len(bboxes) > 0:
+        corners = bboxes.corners
+        num_bboxes = corners.shape[0]
+
+        coords = np.concatenate(
+            [corners.reshape(-1, 3), np.ones((num_bboxes * 8, 1))], axis=-1
+        )
+        transform = copy.deepcopy(transform).reshape(4, 4)
+        coords = coords @ transform.T
+        coords = coords.reshape(-1, 8, 4)
+
+        indices = np.all(coords[..., 2] > 0, axis=1)
+        coords = coords[indices]
+        labels = labels[indices]
+
+        indices = np.argsort(-np.min(coords[..., 2], axis=1))
+        coords = coords[indices]
+        labels = labels[indices]
+
+        coords = coords.reshape(-1, 4)
+        coords[:, 2] = np.clip(coords[:, 2], a_min=1e-5, a_max=1e5)
+        coords[:, 0] /= coords[:, 2]
+        coords[:, 1] /= coords[:, 2]
+
+        coords = coords[..., :2].reshape(-1, 8, 2)
+        for index in range(coords.shape[0]):
+            name = classes[labels[index]]
+            for start, end in [
+                (0, 1),
+                (0, 3),
+                (0, 4),
+                (1, 2),
+                (1, 5),
+                (3, 2),
+                (3, 7),
+                (4, 5),
+                (4, 7),
+                (2, 6),
+                (5, 6),
+                (6, 7),
+            ]:
+                cv2.line(
+                    canvas,
+                    coords[index, start].astype(np.int),
+                    coords[index, end].astype(np.int),
+                    color or OBJECT_PALETTE[name],
+                    thickness,
+                    cv2.LINE_AA,
+                )
+        canvas = canvas.astype(np.uint8)
+    canvas = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+
+    mmcv.mkdir_or_exist(os.path.dirname(fpath))
+    mmcv.imwrite(canvas, fpath)
 
 
 def box_center_shift(bboxes: LiDARInstance3DBoxes, new_center):
